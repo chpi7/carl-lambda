@@ -1,6 +1,6 @@
 # carl-lambda
 
-Lambda calculus experiments.
+Mostly useless but fun to play around with :)
 
 ```
 > #!load_stdlib
