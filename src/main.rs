@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::io::{self, Write};
+
 use std::collections::{HashMap, HashSet};
 
 /*
@@ -37,6 +39,41 @@ enum Term {
 
     /// This is just for convenience to have reusable names like true and false and so on.
     Definition(String, Box<Term>),
+}
+
+impl Term {
+    fn println(&self) {
+        self.print();
+        println!("");
+    }
+
+    fn print(&self) {
+        match self {
+            Term::Definition(name, term) => {
+                print!("def {:} = ", name);
+                term.print();
+                println!(";");
+            }
+            Term::Abstraction(var_name, subterm) => {
+                print!("λ{:}.", var_name);
+                subterm.print();
+            }
+            Term::Application(term1, term2) => {
+                print!("(");
+                term1.print();
+                print!(" , ");
+                term2.print();
+                print!(")");
+            }
+            Term::BoundVariable(depth) => {
+                print!("{:}", depth);
+            }
+            Term::FreeVariable(name) => {
+                print!("{:}", name);
+            }
+            _ => todo!(),
+        }
+    }
 }
 
 fn variant_eq<T>(a: &T, b: &T) -> bool {
@@ -122,8 +159,16 @@ struct ParserState<'a> {
 }
 
 impl ParserState<'_> {
-    pub fn new<'a>(tokens: &'a[Token]) -> ParserState<'a>
-    {
+    pub fn empty<'a>() -> ParserState<'a> {
+        ParserState {
+            remaining_tokens: &[],
+            abstraction_depth: 0,
+            bound_variables: HashMap::new(),
+            named_terms: HashMap::new(),
+        }
+    }
+
+    pub fn new<'a>(tokens: &'a [Token]) -> ParserState<'a> {
         ParserState {
             remaining_tokens: tokens,
             abstraction_depth: 0,
@@ -137,6 +182,10 @@ impl ParserState<'_> {
 struct ParseError(String);
 
 impl ParserState<'_> {
+    fn current(&self) -> Option<&Token> {
+        self.remaining_tokens.first()
+    }
+
     /// Peek at the next token after the current one.
     fn peek(&self) -> Option<&Token> {
         if self.remaining_tokens.len() > 2 {
@@ -206,8 +255,8 @@ impl ParserState<'_> {
     }
 }
 
-fn parse_program(state: &mut ParserState) -> Result<Term, ParseError> {
-    println!("parse program {:?}", state.remaining_tokens);
+fn parse_program(state: &mut ParserState) -> Result<Option<Term>, ParseError> {
+    // println!("parse program {:?}", state.remaining_tokens);
 
     while !state.remaining_tokens.is_empty() {
         match state.remaining_tokens {
@@ -220,60 +269,88 @@ fn parse_program(state: &mut ParserState) -> Result<Term, ParseError> {
                     state.consume(Token::Semi, "Expected semicolon after def <name> = <term>")?;
                     // println!("storing named term: {:?}", term);
                     state.named_terms.insert(name, term);
-                },
+                }
                 _ => break,
             },
             _ => panic!("This should not happen!"),
         }
     }
-    
-    parse_term(state)
+
+    if !state.remaining_tokens.is_empty() {
+        Ok(Some(parse_term(state)?))
+    } else {
+        Ok(None)
+    }
 }
 
-/// Parse a term beginning at the start of tokens
-fn parse_term(state: &mut ParserState) -> Result<Term, ParseError> {
-    println!("parse term {:?}", state.remaining_tokens);
+/// Parse an identifier into whatever it represents.
+fn parse_atom(state: &mut ParserState) -> Result<Term, ParseError> {
+    // println!("parse atom {:?}", state.remaining_tokens);
+    let name = state.consume_ident()?.to_string();
+    if let Some(relative_depth) = state.relative_depth(&name) {
+        Ok(Term::BoundVariable(relative_depth))
+    } else if let Some(named_term) = state.named_terms.get(&name) {
+        Ok(named_term.clone()) // Just copy paste the named term here.
+    } else {
+        Ok(Term::FreeVariable(name.to_string()))
+    }
+}
 
+fn can_start_term(t: &Token) -> bool {
+    match t {
+        Token::OpenParen => true,
+        Token::Identifier(_) => true,
+        Token::Slash => true,
+        _ => false,
+    }
+}
+
+/// Parses a "basic term". Does not handle applications because an application is just two other
+/// kinds of terms combined.
+fn parse_term_partial(state: &mut ParserState) -> Result<Term, ParseError> {
     let parse_error = Err(ParseError("unexpected token in parse_term".to_string()));
-
     match state.remaining_tokens {
         [head, _tail @ ..] => match head {
-            Token::Slash => panic!("should go through ( for now"),
-            Token::Def => todo!(),
-            Token::Identifier(name) => {
+            Token::Slash => parse_abstraction(state),
+            Token::Identifier(_) => parse_atom(state),
+            Token::OpenParen => {
                 state.advance();
-
-                if let Some(relative_depth) = state.relative_depth(name) {
-                    Ok(Term::BoundVariable(relative_depth))
-                } else if let Some(named_term) = state.named_terms.get(*name) {
-                    // Just copy paste the named term here.
-                    Ok(named_term.clone())
-                }
-                else {
-                    Ok(Term::FreeVariable(name.to_string()))
-                }
+                let result = parse_term(state);
+                state.consume(Token::CloseParen, "Expected ) after term enclosed in ()")?;
+                result
             }
+
+            /* This is not used atm.
             Token::Number(text) => {
-                let num = u64::from_str_radix(text, 10)
-                    .map_err(|_| ParseError("Number could not be parsed to u64".to_string()))?;
+            let num = u64::from_str_radix(text, 10)
+            .map_err(|_| ParseError("Number could not be parsed to u64".to_string()))?;
                 state.advance();
                 Ok(Term::Constant(Value::Number(num)))
-            }
-
-            Token::OpenParen => match state.peek() {
-                Some(Token::Slash) => parse_abstraction(state),
-                Some(_) => parse_application(state),
-                _ => Err(ParseError("no more tokens after opening paren".to_string())),
-            },
-            Token::CloseParen => parse_error,
-            Token::Equals => parse_error,
-            Token::Dot => parse_error,
-            Token::Semi => parse_error,
-            Token::EndOfFile => parse_error,
-            Token::Error => parse_error,
+                } */
+            // A definition is not a term for the moment, maybe we allow that later to make it more
+            // programming lanugage.
+            Token::Def => return parse_error,
+            _ => return parse_error,
         },
         [] => panic!("This should not happen!"),
     }
+}
+
+/// Parse a term beginning at the start of tokens.
+fn parse_term(state: &mut ParserState) -> Result<Term, ParseError> {
+    // println!("parse term {:?}", state.remaining_tokens);
+
+    // Spool as many "basic" terms into a chain of left-associative applications as possible.
+    let mut lhs = parse_term_partial(state)?;
+    while let Some(token) = state.current() {
+        if !can_start_term(token) {
+            break;
+        }
+        let rhs = parse_term_partial(state)?;
+        lhs = Term::Application(Box::new(lhs), Box::new(rhs));
+    }
+
+    Ok(lhs)
 }
 
 fn parse_definition(_state: &mut ParserState) -> Result<Term, ParseError> {
@@ -281,7 +358,7 @@ fn parse_definition(_state: &mut ParserState) -> Result<Term, ParseError> {
 }
 
 fn parse_abstraction(state: &mut ParserState) -> Result<Term, ParseError> {
-    state.advance(); // consume (
+    // println!("parse abstraction {:?}", state.remaining_tokens);
 
     state.consume(Token::Slash, "Expected / at beginning of abstraction")?;
     let name = state.consume_ident()?.to_string();
@@ -289,13 +366,9 @@ fn parse_abstraction(state: &mut ParserState) -> Result<Term, ParseError> {
 
     state.push_abstraction_depth(&name);
 
-    // lambda binds as far to the right as possible (as long as there is no closing paren)
-    // BUT right now we have everything strictly enclosed in ( and ), so it should be trivial.
     let term = parse_term(state)?;
 
     state.pop_abstraction_depth(&name);
-
-    state.consume(Token::CloseParen, "Abstraction should end with )")?;
 
     Ok(Term::Abstraction(name, Box::new(term)))
 }
@@ -313,7 +386,7 @@ fn parse_application(state: &mut ParserState) -> Result<Term, ParseError> {
     Ok(Term::Application(Box::new(t1), Box::new(t2)))
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct EvalError(String);
 
 fn fv(_term: &Term) -> HashSet<String> {
@@ -352,19 +425,71 @@ fn is_reducible(t: &Term) -> bool {
     }
 }
 
-/// Does beta-reduction: For (/x . s) t, replace all occurrences of x in s with t.
-fn reduce(t1: Term, t2: &Term) -> Term {
-    replace_bound_vars_internal(t1, t2, -1)
+/// Implements normal order reduction. (Always reduce the left-most β-redex).
+fn reduce(t: Term) -> Term {
+    let mut current = t;
+
+    // Always contract left most b-redex:
+    loop {
+        match current {
+            Term::Application(abs, st2) if is_reducible(&current) => {
+                match *abs {
+                    Term::Abstraction(_, st1) => {
+                        /*
+                        print!("reduce: ");
+                        st1.print();
+                        print!(" <- ");
+                        st2.println();
+                        */
+                        current = replace_bound_vars_internal(*st1, &st2, 0);
+                        // print!("current = ");
+                        // current.println();
+                    }
+                    _ => panic!("should not happen we checked before"),
+                }
+            }
+            _ => break,
+        };
+    }
+
+    // println!("loop done");
+
+    // current is no longer reducible
+    current = match current {
+        Term::Application(st1, st2) => {
+            let lhs = reduce(*st1);
+            let rhs = reduce(*st2);
+            Term::Application(Box::new(lhs), Box::new(rhs))
+        }
+        Term::Abstraction(n, st) => Term::Abstraction(n, Box::new(reduce(*st))),
+        _ => current,
+    };
+
+    /*
+    print!("current end: ");
+    current.println();
+    */
+
+    if is_reducible(&current) {
+        reduce(current)
+    } else {
+        current
+    }
 }
 
 /// Does beta-reduction: For (/x . s) t, replace all occurrences of x in s with t.
 fn replace_bound_vars_internal(t1: Term, t2: &Term, depth: i32) -> Term {
-    println!("replace {:?} <- {:?} at {:}", &t1, &t2, depth);
     match t1 {
         Term::FreeVariable(_) => t1,
-        Term::BoundVariable(d) if d == depth => t2.clone(),
+        Term::BoundVariable(d) if d == depth => {
+            // print!("substituting {:} for ", d);
+            // t2.println();
+            t2.clone()
+        }
         Term::BoundVariable(_) => t1,
-        Term::Abstraction(_, st) => replace_bound_vars_internal(*st, t2, depth + 1),
+        Term::Abstraction(n, st) => {
+            Term::Abstraction(n, Box::new(replace_bound_vars_internal(*st, t2, depth + 1)))
+        }
         Term::Application(st1, st2) => Term::Application(
             Box::new(replace_bound_vars_internal(*st1, t2, depth)),
             Box::new(replace_bound_vars_internal(*st2, t2, depth)),
@@ -373,51 +498,120 @@ fn replace_bound_vars_internal(t1: Term, t2: &Term, depth: i32) -> Term {
     }
 }
 
-fn evaluate(term: Term) -> Term {
-    println!("evaluate {:?}", term);
-    match term {
-        Term::Application(t1, t2) => {
-            let tt1 = evaluate(*t1);
-            let tt2 = evaluate(*t2);
-            // Assume that when there is an application, it is reducible after
-            // evaluating the subterms.
-            let res = reduce(tt1, &tt2);
+fn evaluate_src(source: &str) -> Result<Term, EvalError> {
+    let tokens = tokenize(source);
+    let mut parser_state = ParserState::new(&tokens);
+    let term_opt = parse_program(&mut parser_state).map_err(|e| EvalError(e.0))?;
 
-            println!("after replacement: {:?}", res);
+    /*
+    println!("Named terms: {:?}", parser_state.named_terms);
+    for (n, t) in parser_state.named_terms {
+        print!("{:} = ", n);
+        t.println();
+    }
+    println!("Result term: {:?}", term);
+    term.println();
+    */
 
-            res
-        }
-        Term::Abstraction(n, s) => Term::Abstraction(n, Box::new(evaluate(*s))),
-        _ => term,
+    if let Some(term) = term_opt {
+        Ok(reduce(term))
+    } else {
+        Ok(Term::FreeVariable("<empty>".to_string()))
     }
 }
 
-fn main() {
-    let _tmp = "
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reduce_1() {
+        let result = evaluate_src("(/x.x (/y. x y y) x) (/z. /w. z)");
+        let expected = evaluate_src("/y.y");
+        assert!(
+            Ok(Term::Abstraction(
+                "y".to_string(),
+                Box::new(Term::BoundVariable(0))
+            )) == result
+        );
+        assert!(result == expected);
+    }
+
+    #[test]
+    fn control_flow_if_true_false() {
+        let source = "
+            def true = /x . /y . x;
+            def false = /x . /y . y;
+            def if = /z . /x . /y . z x y;
+            if true (if false a z) y
+        ";
+        let result = evaluate_src(source);
+        let expected = evaluate_src("z");
+        assert!(result == expected);
+    }
+}
+
+fn main() -> io::Result<()> {
+    /*
+        def fst = /p . p true;
+        def snd = /p . p false;
+        def pair = /x . /y . /z . z y x;
+    */
+
+    let mut buffer = String::new();
+    let stdin = io::stdin();
+    let mut named_terms: HashMap<String, Term> = HashMap::new();
+
+    let stdlib = "
         def true = /x . /y . x;
         def false = /x . /y . y;
         def if = /z . /x . /y . z x y;
 
         def fst = /p . p true;
         def snd = /p . p false;
-        def pair = /x . /y . /z . z y x;
+        def pair = /x . /y . /z . z x y;
     ";
 
-    let source = "
-        def identity = (/x . x);
-        ((identity identity) z)
-    ";
+    //      /p.p true
+    //      /z.z a b
+    //      (/z.z a b) true
+    //
 
-    let tokens = tokenize(source);
-    println!("tokens: {:?}", tokens);
+    loop {
+        print!("> ");
+        io::stdout().flush().expect("flush failed");
+        buffer.clear();
+        let line = stdin.read_line(&mut buffer)?;
+        if line == 0 {
+            continue;
+        }
 
-    let mut parser_state = ParserState::new(&tokens);
-    let term = parse_program(&mut parser_state).expect("parse error!!");
-    println!("Result term: {:?}", term);
-    println!("Named terms: {:?}", parser_state.named_terms);
+        if buffer.starts_with("#!load_stdlib") {
+            let tokens = tokenize(stdlib);
+            let mut parser_state = ParserState::new(&tokens);
+            let _ = parse_program(&mut parser_state);
+            named_terms.extend(parser_state.named_terms);
+            continue;
+        }
 
-    let result = evaluate(term);
-    println!("result: {:?}", result);
+        let tokens = tokenize(&buffer);
+        // println!("{:?}", tokens);
 
-    assert!(Term::FreeVariable("z".to_string()) == result);
+        let mut parser_state = ParserState::new(&tokens);
+        parser_state.named_terms = named_terms.clone();
+
+        let parse_result = parse_program(&mut parser_state);
+
+        match parse_result {
+            Ok(term_opt) => {
+                // Store "def"ined term for later reuse
+                named_terms.extend(parser_state.named_terms);
+                // Then evaluate the main term and print the result:
+                if let Some(term) = term_opt {
+                    reduce(term).println();
+                }
+            }
+            Err(parse_error) => println!("Error: {:}", parse_error.0),
+        }
+    }
 }
